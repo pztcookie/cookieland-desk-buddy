@@ -1,0 +1,56 @@
+{
+  "type": "object",
+  "properties": {
+    "reply": {"type": "string"},
+    "mood": {"type": "string", "enum": ["gentle", "playful", "goofy", "focused"]},
+    "updates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "done": {"type": "boolean"},
+          "area": {"type": "string", "enum": ["week", "later", "joy", "archive"]}
+        },
+        "required": ["id", "done", "area"],
+        "additionalProperties": false
+      }
+    },
+    "additions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": {"type": "string"},
+          "area": {"type": "string", "enum": ["week", "later", "joy"]},
+          "due": {"type": "string"}
+        },
+        "required": ["title", "area", "due"],
+        "additionalProperties": false
+      }
+    },
+    "ideas": {"type": "array", "items": {"type": "string"}},
+    "today": {"type": "array", "items": {"type": "string"}, "maxItems": 2},
+    "schedule": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "properties": {"time": {"type": "string"}, "title": {"type": "string"}},
+        "required": ["time", "title"],
+        "additionalProperties": false
+      }
+    },
+    "links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {"id": {"type": "string"}, "url": {"type": "string"}},
+        "required": ["id", "url"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["reply", "mood", "updates", "additions", "ideas", "today", "schedule", "links"],
+  "additionalProperties": false
+}
