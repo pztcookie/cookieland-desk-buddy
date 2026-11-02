@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
+  <key>CFBundleExecutable</key><string>CookieCompanion</string>
+  <key>CFBundleIdentifier</key><string>land.cookieland.cookie-companion</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleName</key><string>Cookie 的小日子</string>
+  <key>CFBundleDisplayName</key><string>Cookie 的小日子</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.7</string>
+  <key>CFBundleVersion</key><string>7</string>
+  <key>LSMinimumSystemVersion</key><string>26.0</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>让 Cookie 听见你说的想法，并转成可确认的文字。</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>把你对 Cookie 说的话转成文字，方便整理本周计划。</string>
+  <key>NSAppleEventsUsageDescription</key><string>让 Cookie 控制你这台 Mac 上 Spotify 的播放、暂停和下一首。</string>
+</dict>
+</plist>
