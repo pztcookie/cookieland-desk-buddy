@@ -11,7 +11,7 @@ export SWIFT_MODULE_CACHE_PATH="$repo_dir/.build/swift-cache"
 export CLANG_MODULE_CACHE_PATH="$repo_dir/.build/clang-cache"
 swiftc -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
   -target "$(uname -m)-apple-macosx26.0" -parse-as-library \
-  "$repo_dir/app/CookieCompanion.swift" \
+  "$repo_dir/app/CookieCompanion.swift" "$repo_dir/app/LearningPlan.swift" \
   -o "$app_dir/Contents/MacOS/CookieCompanion"
 cp "$repo_dir/app/Info.plist" "$app_dir/Contents/Info.plist"
 cp "$repo_dir/app/agent-response.schema.json" "$resources/"

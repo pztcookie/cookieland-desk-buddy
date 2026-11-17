@@ -31,6 +31,9 @@
     },
     "ideas": {"type": "array", "items": {"type": "string"}},
     "today": {"type": "array", "items": {"type": "string"}, "maxItems": 2},
+    "replaceToday": {"type": "boolean"},
+    "weekOrder": {"type": "array", "items": {"type": "string"}, "maxItems": 12},
+    "choices": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
     "schedule": {
       "type": "array",
       "maxItems": 6,
@@ -51,6 +54,6 @@
       }
     }
   },
-  "required": ["reply", "mood", "updates", "additions", "ideas", "today", "schedule", "links"],
+  "required": ["reply", "mood", "updates", "additions", "ideas", "today", "replaceToday", "weekOrder", "choices", "schedule", "links"],
   "additionalProperties": false
 }

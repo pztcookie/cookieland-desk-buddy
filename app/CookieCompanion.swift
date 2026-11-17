@@ -5,7 +5,7 @@ import CoreText
 import AVFoundation
 import Speech
 
-private enum Palette {
+enum Palette {
     static let ink = Color(red: 0.09, green: 0.25, blue: 0.52)
     static let softInk = Color(red: 0.22, green: 0.37, blue: 0.57)
     static let cream = Color(red: 1.00, green: 0.98, blue: 0.94)
@@ -35,6 +35,7 @@ struct ChatMessage: Codable, Identifiable, Equatable {
     var id: String
     var role: String
     var text: String
+    var choices: [String]? = nil
 }
 
 struct DayBlock: Codable, Identifiable, Equatable {
@@ -51,6 +52,7 @@ struct CompanionState: Codable {
     var weekStart: String?
     var dayStart: String?
     var todayTaskIDs: [String]?
+    var weekOrder: [String]?
     var dayBlocks: [DayBlock]?
     var spotifyURI: String?
 
@@ -69,6 +71,7 @@ struct CompanionState: Codable {
         weekStart: nil,
         dayStart: nil,
         todayTaskIDs: ["sketch"],
+        weekOrder: nil,
         dayBlocks: [],
         spotifyURI: nil
     )
@@ -112,6 +115,7 @@ final class CompanionStore: ObservableObject {
             }
         }
         state.weekStart = current
+        state.weekOrder = []
         state.mood = "gentle"
     }
 
@@ -122,8 +126,12 @@ final class CompanionStore: ObservableObject {
         let today = formatter.string(from: Date())
         guard state.dayStart != today else { return }
         state.dayStart = today
-        state.todayTaskIDs = state.tasks.first(where: { $0.area == "week" && !$0.done })
-            .map { [$0.id] } ?? []
+        let ordered = (state.weekOrder ?? []).compactMap { id in
+            state.tasks.first(where: { $0.id == id && $0.area == "week" && !$0.done })
+        }
+        state.todayTaskIDs = (ordered.first ?? state.tasks.first(where: {
+            $0.area == "week" && !$0.done
+        })).map { [$0.id] } ?? []
         state.dayBlocks = []
         save()
     }
@@ -170,8 +178,9 @@ final class CompanionStore: ObservableObject {
         save()
     }
 
-    func addMessage(_ role: String, _ text: String) {
-        state.messages.append(.init(id: UUID().uuidString, role: role, text: text))
+    func addMessage(_ role: String, _ text: String, choices: [String]? = nil) {
+        state.messages.append(.init(id: UUID().uuidString, role: role,
+                                    text: text, choices: choices))
         if state.messages.count > 80 { state.messages.removeFirst(state.messages.count - 80) }
         save()
     }
@@ -184,7 +193,8 @@ final class CompanionStore: ObservableObject {
         for change in answer.updates {
             guard let index = state.tasks.firstIndex(where: { $0.id == change.id }),
                   knownAreas.contains(change.area) else { continue }
-            state.tasks[index].done = change.done
+            // 聊天整理不能把已完成的成果意外改回未完成；需要时用户可手动取消勾选。
+            state.tasks[index].done = state.tasks[index].done || change.done
             state.tasks[index].area = change.area
         }
         for addition in answer.additions {
@@ -205,17 +215,40 @@ final class CompanionStore: ObservableObject {
             let value = idea.trimmingCharacters(in: .whitespacesAndNewlines)
             if !value.isEmpty && !state.ideas.contains(value) { state.ideas.append(value) }
         }
-        if !answer.today.isEmpty {
-            state.todayTaskIDs = answer.today.prefix(2).compactMap { value in
-                state.tasks.first(where: { $0.id == value || $0.title == value })?.id
+        if answer.replaceToday {
+            var ids: [String] = []
+            for value in answer.today.prefix(2) {
+                guard let index = state.tasks.firstIndex(where: {
+                    ($0.id == value || $0.title == value) && !$0.done
+                }) else { continue }
+                if state.tasks[index].area == "later" { state.tasks[index].area = "week" }
+                guard state.tasks[index].area == "week", !ids.contains(state.tasks[index].id) else { continue }
+                ids.append(state.tasks[index].id)
             }
+            state.todayTaskIDs = ids
+        }
+        if !answer.weekOrder.isEmpty {
+            var ids: [String] = []
+            for value in answer.weekOrder {
+                guard let task = state.tasks.first(where: {
+                    ($0.id == value || $0.title == value) && $0.area == "week" && !$0.done
+                }), !ids.contains(task.id) else { continue }
+                ids.append(task.id)
+            }
+            ids += state.tasks.filter { $0.area == "week" && !$0.done && !ids.contains($0.id) }.map(\.id)
+            state.weekOrder = ids
         }
         if !answer.schedule.isEmpty {
             state.dayBlocks = answer.schedule.prefix(6).map {
                 DayBlock(id: UUID().uuidString, time: $0.time, title: $0.title)
             }
         }
-        addMessage("assistant", answer.reply)
+        var choices: [String] = []
+        for raw in answer.choices {
+            let choice = String(raw.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
+            if !choice.isEmpty && !choices.contains(choice) { choices.append(choice) }
+        }
+        addMessage("assistant", answer.reply, choices: choices.isEmpty ? nil : Array(choices.prefix(3)))
     }
 }
 
@@ -244,6 +277,9 @@ struct AgentAnswer: Codable, Sendable {
     var additions: [Addition]
     var ideas: [String]
     var today: [String]
+    var replaceToday: Bool
+    var weekOrder: [String]
+    var choices: [String]
     var schedule: [ScheduleItem]
     var links: [LinkUpdate]
 }
@@ -260,13 +296,16 @@ enum ChatEngine {
         let context = state.messages.suffix(6).map {
             "\($0.role == "user" ? "用户" : "Cookie")：\($0.text)"
         }.joined(separator: "\n")
+        let learningContext = LearningSchedule.context()
         let prompt = """
+        \(learningContext)
         你是 Cookie 的 Cookieland 生活小助手。请用简短自然的中文直接回应用户，像温柔可靠的同伴，不说教、不催促。
-        职责：接住散乱想法；把有明确期限且用户想完成的放到 week，游戏完成后或未来再决定的放到 later，纯粹想玩的放到 joy/ideas。每天最多建议一件主线和一件可选小事。做完可打勾，没做不补作业。不要把所有想法自动变成任务。
-        今天是 \(today)。以用户这次说的话和当前计划为准；不要擅自假设固定截止日、职业安排或发布进度。画画、手工、旅行等灵感也可以只是乐趣。
-        只在用户明确说某项完成时，才用 updates 标记 done=true；不要把上传、发布、收费或其他外部动作说成已完成。更新已有任务时使用原 id；没有变动就让 updates 为空。新承诺才加 additions；普通新念头放 ideas。不要调用工具，也不要声称同步了外部清单。
-        reply 最多 120 个汉字，先接住感受，再给一个具体、很小的下一步；用户只想聊天时可以不安排任务。mood 请选择 gentle（安静接住）、playful（调皮）、goofy（完成后搞笑庆祝）、focused（认真梳理），要和回应内容相配。输出必须符合 JSON Schema。
-        如果用户明确要安排今天，today 填今天选中的任务，最多两件，优先一个主线、一个可选。已有任务请填上面给出的原 id；这次新增的任务才填 additions 中的准确标题。否则 today 留空数组，不改今天安排。
+        职责：用户随便说，你负责把话分成明确要做的任务、以后再做的任务、纯灵感和已完成的事。以用户最近明确说的优先级为第一依据，再看真实截止日期、先后依赖和今天的精力；不要凭空推断收益、紧迫性或截止日。用户说“先放后面”就移到 later。不要把每个“想做”都变成这周的压力。
+        今天是 \(today)。本周可推进的承诺放 week；未来想做但没有本周承诺的放 later；纯灵感只放 ideas，显示在独立的「灵感」页。今天最多一件主线和一件可选小事，做完可打勾，没做不补作业。画画、手工、旅行也可以只是乐趣。先看当前计划周范围：日期明确落在下周的学习课，不要提前塞进本周。
+        用户新增任务、改变优先级或请你整理计划时，自动同步本周与今天，不要求用户再说“更新日程”：用 additions/updates 放好任务，weekOrder 给本周未完成任务排先后；replaceToday=true，并用 today 选今天一件主线、至多一件可选。用户最近明确的本周第一主线，也是今天第一件；已有固定时间的 Agent 学习课保留在 schedule，不因此把学习变成今天主线。只有用户明确说今天改做别的，才让今天主线与本周第一优先不同。已有任务填原 id，新任务填 additions 里的准确标题。若只是聊天或丢来一个纯灵感，weekOrder、today 留空，replaceToday=false，保留原计划。用户明确说今天休息或不安排时，replaceToday=true 且 today=[]。
+        如果真正影响排序的取舍仍不清楚，先保存确定的部分，只问一个具体问题；reply 最后写这个问题，choices 给 2～3 个短选项，让用户点一下就能回答。已有明确先后时直接安排，不反复追问。没把握的灵感留在 ideas 或 later，不替用户作重大承诺。
+        只有用户明确说完成，updates 才可把 done 改成 true；不要把计划、上传、发布、收费或其他外部动作说成已完成。更新已有任务用原 id，避免重复创建同名任务。不要调用工具，也不要声称同步了外部清单。
+        reply 最多 120 个汉字，先接住感受，再简短说清今天主线、本周顺序或灵感放在哪里；用户只想聊天时可以不安排任务。mood 选 gentle（安静接住）、playful（调皮）、goofy（完成后搞笑庆祝）、focused（认真梳理），与内容相配。输出必须符合 JSON Schema。
         如果用户想排今天的课程表或工作时间，schedule 填完整的今天时间段，最多 6 段；用户说了具体上课时间就原样保留，没说具体时间只用「上午」「下午」「晚上」这样的宽松时段，不编造精确时间。普通聊天时 schedule 留空数组，不改变现有时间表。
         如果用户给了某个工作的网页链接，links 填对应任务原 id 与完整 http(s) URL；新任务可用 additions 里的准确标题。没有链接就留空，不要编造链接。任务标题旁的「打开」只会打开已保存的链接。
 
@@ -275,6 +314,7 @@ enum ChatEngine {
         \(compactTasks)
         想法花园：\(state.ideas.joined(separator: "、"))
         今天已安排的任务 ID：\((state.todayTaskIDs ?? []).joined(separator: "、"))
+        本周当前优先顺序 ID：\((state.weekOrder ?? []).joined(separator: "、"))
         今天已安排的时间段：\((state.dayBlocks ?? []).map { "\($0.time) \($0.title)" }.joined(separator: "；"))
         最近对话：
         \(context)
@@ -408,9 +448,15 @@ final class SpeechCapture: ObservableObject {
     }
 }
 
+private enum CookieImageCache {
+    static let shared = NSCache<NSString, NSImage>()
+}
+
 private func bundledImage(_ name: String) -> NSImage {
+    if let cached = CookieImageCache.shared.object(forKey: name as NSString) { return cached }
     guard let path = Bundle.main.path(forResource: name, ofType: "png"),
           let image = NSImage(contentsOfFile: path) else { return NSImage() }
+    CookieImageCache.shared.setObject(image, forKey: name as NSString)
     return image
 }
 
@@ -748,6 +794,7 @@ final class SpotifyController: ObservableObject {
 
 struct CompanionView: View {
     @StateObject private var store = CompanionStore()
+    @StateObject private var learning = LearningStore()
     @StateObject private var speech = SpeechCapture()
     @StateObject private var pet = DesktopPetController()
     @StateObject private var spotify = SpotifyController()
@@ -760,9 +807,16 @@ struct CompanionView: View {
     @State private var lastFailedText: String?
     @State private var errorText: String?
     @State private var floating = false
+    @State private var showLater = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private var weekTasks: [PlanTask] { store.state.tasks.filter { $0.area == "week" } }
+    private var weekTasks: [PlanTask] {
+        let tasks = store.state.tasks.filter { $0.area == "week" }
+        let ordered = (store.state.weekOrder ?? []).compactMap { id in
+            tasks.first(where: { $0.id == id })
+        }
+        return ordered + tasks.filter { task in !ordered.contains(where: { $0.id == task.id }) }
+    }
     private var completed: Int { weekTasks.filter(\.done).count }
     private var todayTasks: [PlanTask] {
         (store.state.todayTaskIDs ?? []).compactMap { id in
@@ -831,6 +885,7 @@ struct CompanionView: View {
         }
     }
     private var headerLine: String {
+        if tab == 4 { return "学一点、做一点。创作仍然是主线。" }
         let value = store.state.messages.last(where: { $0.role == "assistant" })?.text
             ?? "想法很多也没关系，我帮你放好。"
         return value.count > 29 ? String(value.prefix(29)) + "…" : value
@@ -850,6 +905,7 @@ struct CompanionView: View {
             pet.reduceMotion = reduceMotion
             pet.musicActive = spotify.musicMode && spotify.isPlaying
             store.rollDayIfNeeded()
+            learning.tick()
             spotifyInput = store.state.spotifyURI ?? ""
             if spotify.musicMode { spotify.refreshPlayback() }
             if !reduceMotion {
@@ -887,6 +943,10 @@ struct CompanionView: View {
         }
         .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
             store.rollDayIfNeeded()
+            learning.tick()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openCookieLearning)) { _ in
+            tab = 4; compact = false
         }
         .onReceive(Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()) { _ in
             pet.tick()
@@ -921,6 +981,8 @@ struct CompanionView: View {
             Button("打开今天安排") { tab = 0; compact = false }
             Button("打开本周进展") { tab = 1; compact = false }
             Button("一起听音乐") { tab = 3; compact = false }
+            Button("打开学习计划") { tab = 4; compact = false }
+            Button("看看灵感花园") { tab = 5; compact = false }
             Divider()
             Button("跳支舞") { pet.perform(.dancing, for: 6) }
             Button("恶作剧一下") { pet.perform(.prank, for: 5) }
@@ -945,7 +1007,9 @@ struct CompanionView: View {
                 case 0: todayView
                 case 1: weekView
                 case 2: chatView
-                default: musicView
+                case 3: musicView
+                case 4: CookieLearningView(learning: learning)
+                default: ideasView
                 }
                 tabBar
             }
@@ -999,6 +1063,10 @@ struct CompanionView: View {
     private var todayView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                Button { tab = 4 } label: {
+                    Label(learning.today.map { "今天 14:00 · " + $0.phase + "：" + $0.topic } ?? "查看本周学习计划", systemImage: "book")
+                        .font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading)
+                }.buttonStyle(.bordered)
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("今天，轻轻做一点")
@@ -1205,7 +1273,16 @@ struct CompanionView: View {
                         .foregroundStyle(Palette.softInk)
                 } else {
                     VStack(spacing: 9) {
-                        ForEach(weekTasks) { task in taskRow(task) }
+                        ForEach(Array(weekTasks.enumerated()), id: \.element.id) { index, task in
+                            VStack(alignment: .leading, spacing: 4) {
+                                if !task.done {
+                                    Text(index == 0 ? "本周主线" : "接下来 · \(index + 1)")
+                                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(Palette.softInk)
+                                }
+                                taskRow(task)
+                            }
+                        }
                     }
                 }
 
@@ -1219,22 +1296,26 @@ struct CompanionView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Palette.mint.opacity(0.67), in: RoundedRectangle(cornerRadius: 13))
 
-                if !store.state.tasks.filter({ $0.area == "later" }).isEmpty {
-                    Text("完成游戏之后")
-                        .font(.custom("Xiaolai", size: 19)).fontWeight(.bold)
-                        .foregroundStyle(Palette.ink)
-                    ForEach(store.state.tasks.filter { $0.area == "later" }) { task in
-                        taskRow(task)
+                let laterTasks = store.state.tasks.filter { $0.area == "later" }
+                if !laterTasks.isEmpty {
+                    DisclosureGroup(isExpanded: $showLater) {
+                        VStack(spacing: 9) {
+                            ForEach(laterTasks) { task in taskRow(task) }
+                        }
+                        .padding(.top, 8)
+                    } label: {
+                        Text("以后再慢慢做 · \(laterTasks.count)")
+                            .font(.custom("Xiaolai", size: 19)).fontWeight(.bold)
+                            .foregroundStyle(Palette.ink)
                     }
                 }
 
-                Text("想法花园")
-                    .font(.custom("Xiaolai", size: 19)).fontWeight(.bold)
-                    .foregroundStyle(Palette.ink)
-                Text(store.state.ideas.prefix(6).joined(separator: "  ·  "))
-                    .font(.system(size: 13, design: .rounded))
-                    .foregroundStyle(Palette.softInk)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button { tab = 5 } label: {
+                    Label("看看灵感花园 · \(store.state.ideas.count) 个念头", systemImage: "sparkles")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Palette.ink)
                 if !store.state.tasks.filter({ $0.area == "archive" }).isEmpty {
                     Text("做成过的事")
                         .font(.custom("Xiaolai", size: 19)).fontWeight(.bold)
@@ -1247,6 +1328,46 @@ struct CompanionView: View {
                 }
                 Button { tab = 2 } label: {
                     Label("把新想法告诉 Cookie", systemImage: "bubble.left.and.text.bubble.right")
+                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Palette.ink)
+                .background(Palette.pink, in: RoundedRectangle(cornerRadius: 13))
+            }
+            .padding(18)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Palette.cream.opacity(0.94), in: RoundedRectangle(cornerRadius: 23))
+        .overlay(RoundedRectangle(cornerRadius: 23).stroke(Palette.stroke.opacity(0.65), lineWidth: 1.5))
+    }
+
+    private var ideasView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("想法花园")
+                    .font(.custom("Xiaolai", size: 24)).fontWeight(.bold)
+                    .foregroundStyle(Palette.ink)
+                Text("灵感先住在这里，不用立刻变成待办。想推进时，再告诉 Cookie。")
+                    .font(.system(size: 13, design: .rounded))
+                    .foregroundStyle(Palette.softInk)
+                if store.state.ideas.isEmpty {
+                    Text("这里还空着。一个小念头也可以先放进来。")
+                        .font(.system(size: 14, design: .rounded))
+                        .foregroundStyle(Palette.softInk)
+                } else {
+                    ForEach(Array(store.state.ideas.enumerated()), id: \.offset) { entry in
+                        Label(entry.element, systemImage: "sparkle")
+                            .font(.system(size: 14, design: .rounded))
+                            .foregroundStyle(Palette.ink)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(12)
+                            .background(Color.white.opacity(0.78), in: RoundedRectangle(cornerRadius: 13))
+                    }
+                }
+                Button { tab = 2 } label: {
+                    Label("把新想法说给 Cookie", systemImage: "bubble.left")
                         .font(.system(size: 14, weight: .semibold, design: .rounded))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
@@ -1322,16 +1443,33 @@ struct CompanionView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
                         ForEach(store.state.messages) { message in
-                            HStack {
-                                if message.role == "user" { Spacer(minLength: 55) }
-                                Text(message.text)
-                                    .font(.system(size: 14, design: .rounded))
-                                    .foregroundStyle(Palette.ink)
-                                    .padding(11)
-                                    .background(message.role == "user" ? Palette.lavender.opacity(0.85) :
-                                                Color.white.opacity(0.91),
-                                                in: RoundedRectangle(cornerRadius: 14))
-                                if message.role != "user" { Spacer(minLength: 55) }
+                            VStack(alignment: .leading, spacing: 7) {
+                                HStack {
+                                    if message.role == "user" { Spacer(minLength: 55) }
+                                    Text(message.text)
+                                        .font(.system(size: 14, design: .rounded))
+                                        .foregroundStyle(Palette.ink)
+                                        .padding(11)
+                                        .background(message.role == "user" ? Palette.lavender.opacity(0.85) :
+                                                    Color.white.opacity(0.91),
+                                                    in: RoundedRectangle(cornerRadius: 14))
+                                    if message.role != "user" { Spacer(minLength: 55) }
+                                }
+                                if message.id == store.state.messages.last?.id,
+                                   let choices = message.choices, !choices.isEmpty {
+                                    ForEach(choices, id: \.self) { choice in
+                                        Button { send("我选：" + choice, record: true) } label: {
+                                            Text(choice)
+                                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                                .padding(.horizontal, 12).padding(.vertical, 8)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .foregroundStyle(Palette.ink)
+                                        .background(Palette.lavender.opacity(0.8), in: Capsule())
+                                        .disabled(sending)
+                                    }
+                                }
                             }
                             .id(message.id)
                         }
@@ -1430,6 +1568,8 @@ struct CompanionView: View {
             tabButton("本周", icon: "checkmark.circle", value: 1)
             tabButton("聊天", icon: "bubble.left", value: 2)
             tabButton("音乐", icon: "music.note", value: 3)
+            tabButton("学习", icon: "book", value: 4)
+            tabButton("灵感", icon: "sparkles", value: 5)
         }
         .padding(6)
         .background(Palette.cream.opacity(0.93), in: Capsule())
@@ -1474,6 +1614,7 @@ struct CompanionView: View {
     }
 }
 
+#if !COOKIE_TESTING
 @main
 struct CookieCompanionApp: App {
     init() { registerHandwrittenFont() }
@@ -1485,3 +1626,4 @@ struct CookieCompanionApp: App {
         .windowResizability(.contentSize)
     }
 }
+#endif
